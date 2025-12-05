@@ -3,16 +3,16 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-from sklearn.cluster import KMeans, AgglomerativeClustering
+from kmodes.kprototypes import KPrototypes
+from sklearn.mixture import GaussianMixture
+from sklearn.cluster import AgglomerativeClustering
 from scipy.cluster.hierarchy import dendrogram, linkage
-import umap
 
 # =========================
 # 1. Caricamento dati
 # =========================
-train = pd.read_csv("drugLibTrain_raw.tsv", sep="\t")
-test = pd.read_csv("drugLibTest_raw.tsv", sep="\t")
+train = pd.read_csv("drugLibTrain_final_v4.tsv", sep="\t")
+test = pd.read_csv("drugLibTest_final_v4.tsv", sep="\t")
 df = pd.concat([train, test], ignore_index=True)
 
 # =========================
@@ -23,7 +23,7 @@ df_cond = df[df["condition"] == condition]
 print(f"Recensioni trovate per '{condition}': {len(df_cond)}")
 
 # ==========================================================
-# 3B. BAYESIAN RATING (INTEGRATO)
+# 3. BAYESIAN RATING (INTEGRATO)
 # ==========================================================
 print("\n=== Calcolo Bayesian Rating ===")
 
@@ -56,32 +56,7 @@ df_bayes["delta"] = df_bayes["bayes_mean"] - df_bayes["rating_mean"]
 print(df_bayes.sort_values("delta").head(5))
 
 # =========================
-# 4. Visualizzazioni preliminari
-# =========================
-# Lollipop Plot
-plt.figure(figsize=(10, 6))
-top = df_bayes["bayes_mean"].head(10)
-winner = top.index[0]
-for i, drug in enumerate(top.index):
-    value = top[drug]
-    color = "#1f77b4" if drug == winner else "#aec7e8"
-    lw = 4 if drug == winner else 2
-    size = 600 if drug == winner else 400
-    plt.hlines(y=drug, xmin=0, xmax=value, color=color, linewidth=lw, alpha=0.8)
-    plt.scatter(value, drug, color=color, s=size, edgecolor='white', linewidth=1.5, zorder=5)
-    plt.text(value, i, f"{value:.2f}", va='center', ha='center', fontsize=7, color='white', fontweight='bold', zorder=6)
-
-plt.title(f"Lollipop Plot – {condition} (Bayesian Rating)", fontsize=16)
-plt.xlabel("Bayesian Mean")
-plt.ylabel("Farmaco")
-plt.xlim(0, top.max() + 1)
-plt.gca().invert_yaxis()
-plt.grid(axis='x', linestyle='--', alpha=0.3)
-plt.tight_layout()
-plt.show()
-
-# =========================
-# 5. Prepara dati per clustering
+# 4. Prepara dati per clustering
 # =========================
 cluster_df = df_cond.groupby("urlDrugName").agg({
     "rating": ["mean", "std", "count"],
@@ -97,22 +72,55 @@ scaler = StandardScaler()
 X_scaled = scaler.fit_transform(cluster_df)
 
 # =========================
-# 6. K-Means Clustering
+# 5. K-Prototypes Clustering (con colonna categoriale)
 # =========================
 k = 3
-kmeans = KMeans(n_clusters=k, random_state=42)
-cluster_df["KMeans"] = kmeans.fit_predict(X_scaled)
 
-# PCA 2D
+# Aggiungo una colonna categoriale fittizia (tipo farmaco)
+cluster_df['tipo_farmaco'] = df_cond.groupby('urlDrugName')['condition'].first()
+
+# Preparo i dati per K-Prototypes
+X_features = cluster_df[['rating_mean', 'rating_std', 'eff_count', 'n_reviews', 'bayes_mean', 'tipo_farmaco']]
+categorical_indices = [5]  # indice della colonna 'tipo_farmaco'
+
+# Fit K-Prototypes
+kproto = KPrototypes(n_clusters=k, init='Cao', verbose=2, random_state=42)
+cluster_df["KPrototypes"] = kproto.fit_predict(X_features.to_numpy(), categorical=categorical_indices)
+
+# PCA 2D per visualizzazione, PC1 e PC2 servono solo per ridurre la dimensionalità e visualizzare i cluster in 2D.
 pca = PCA(n_components=2)
-cluster_df[["PC1", "PC2"]] = pca.fit_transform(X_scaled)
+cluster_df[["PC1", "PC2"]] = pca.fit_transform(X_features.iloc[:, :-1])  # solo colonne numeriche
 
+# Plot PCA
 plt.figure(figsize=(10, 6))
 palette = sns.color_palette("Set1", n_colors=k)
 for label in range(k):
-    subset = cluster_df[cluster_df["KMeans"] == label]
+    subset = cluster_df[cluster_df["KPrototypes"] == label]
     plt.scatter(subset["PC1"], subset["PC2"], s=subset["n_reviews"]*5, label=f'Cluster {label}')
-plt.title(f"K-Means Clustering – {condition}")
+plt.title(f"K-Prototypes Clustering – {condition}")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+plt.legend()
+plt.grid(True, linestyle="--", alpha=0.3)
+plt.show()
+
+# =========================
+# 6. Gaussian Mixture Model Clustering
+# =========================
+k = 3  # numero di cluster
+
+gmm = GaussianMixture(n_components=k, covariance_type='full', random_state=42)
+cluster_df["GMM"] = gmm.fit_predict(X_scaled)
+pca = PCA(n_components=2)
+cluster_df[["PC1", "PC2"]] = pca.fit_transform(X_scaled)
+
+plt.figure(figsize=(10,6))
+palette = sns.color_palette("Set1", n_colors=k)
+for label, color in zip(range(k), palette):
+    subset = cluster_df[cluster_df["GMM"] == label]
+    plt.scatter(subset["PC1"], subset["PC2"], s=subset["n_reviews"]*5, label=f'Cluster {label}', color=color)
+
+plt.title(f"GMM Clustering – {condition}")
 plt.xlabel("PC1")
 plt.ylabel("PC2")
 plt.legend()
@@ -147,46 +155,11 @@ plt.tight_layout()
 plt.show()
 
 # =========================
-# 8. t-SNE & UMAP
+# 8. Stampa informazioni utili clustering
 # =========================
-X_features = cluster_df[['rating_mean', 'rating_std', 'eff_count', 'n_reviews', 'bayes_mean']]
-
-# t-SNE
-tsne = TSNE(n_components=2, perplexity=5, random_state=42)
-cluster_df[['TSNE1', 'TSNE2']] = tsne.fit_transform(X_features)
-
-plt.figure(figsize=(12, 8))
-sns.scatterplot(data=cluster_df, x='TSNE1', y='TSNE2', hue='KMeans', palette='Set2', s=120)
-for idx, row in cluster_df.iterrows():
-    plt.text(row.TSNE1 + 0.2, row.TSNE2 + 0.2, idx, fontsize=8)
-plt.title("t-SNE Clustering Visualization")
-plt.xlabel("t-SNE 1")
-plt.ylabel("t-SNE 2")
-plt.legend(title="Cluster")
-plt.grid(True)
-plt.show()
-
-# UMAP
-reducer = umap.UMAP(n_neighbors=5, min_dist=0.3, metric='euclidean', random_state=42)
-cluster_df[['UMAP1', 'UMAP2']] = reducer.fit_transform(X_features)
-
-plt.figure(figsize=(12, 8))
-sns.scatterplot(data=cluster_df, x='UMAP1', y='UMAP2', hue='KMeans', palette='Set2', s=120)
-for idx, row in cluster_df.iterrows():
-    plt.text(row.UMAP1 + 0.2, row.UMAP2 + 0.2, idx, fontsize=8)
-plt.title("UMAP Clustering Visualization")
-plt.xlabel("UMAP 1")
-plt.ylabel("UMAP 2")
-plt.legend(title="Cluster")
-plt.grid(True)
-plt.show()
-
-# =========================
-# 9. Stampa informazioni utili clustering
-# =========================
-cluster_order = cluster_df.groupby("KMeans")["bayes_mean"].mean().sort_values(ascending=False)
+cluster_order = cluster_df.groupby("KPrototypes")["bayes_mean"].mean().sort_values(ascending=False)
 cluster_mapping = {num: name for num, name in zip(cluster_order.index, ["Top", "Medio", "Basso"])}
-cluster_df["cluster_name"] = cluster_df["KMeans"].map(cluster_mapping)
+cluster_df["cluster_name"] = cluster_df["KPrototypes"].map(cluster_mapping)
 
 print("\n=== CLUSTERING FARMACI – Condizione:", condition, "===\n")
 print("Feature usate per il clustering:")
@@ -194,4 +167,3 @@ print(cluster_df[["rating_mean", "rating_std", "n_reviews", "eff_count", "bayes_
 
 print("Cluster assegnati con nomi significativi:")
 print(cluster_df[["rating_mean", "bayes_mean", "eff_count", "n_reviews", "cluster_name"]].sort_values("bayes_mean", ascending=False))
-
