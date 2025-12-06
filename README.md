@@ -1,4 +1,3 @@
-```markdown
 # Progetto-Percezioni  
 
 Analisi del dataset *Drug Reviews* nell’ambito del corso “Principi e modelli della percezione”.  
@@ -57,4 +56,3 @@ Se usi questo progetto come base o riferimento, per favore cita l’autore: *imN
 ## 📝 Licenza
 
 “No license — uso personale / accademico”
-```
