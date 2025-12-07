@@ -1,0 +1,101 @@
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import mean_squared_error, r2_score
+
+# 1. CARICAMENTO E PREPROCESSING DATI
+input_train_name = 'drugLibTrain_final_v3.tsv'
+input_test_name = 'drugLibTest_final_v3.tsv'
+
+try:
+    df_train = pd.read_csv(input_train_name, sep='\t')
+    df_test = pd.read_csv(input_test_name, sep='\t')
+except FileNotFoundError:
+    print("Errore nel caricamento dei file.")
+    exit()
+
+# Gestione colonna condizione
+cond_col = 'condition_standardized_v3'
+if cond_col not in df_train.columns:
+    cond_col = 'condition_standardized'
+
+# Mappings Ordinali
+eff_map = {
+    'Ineffective': 1, 'Marginally Effective': 2, 'Moderately Effective': 3,
+    'Considerably Effective': 4, 'Highly Effective': 5
+}
+side_map = {
+    'No Side Effects': 1, 'Mild Side Effects': 2, 'Moderate Side Effects': 3,
+    'Severe Side Effects': 4, 'Extremely Severe Side Effects': 5
+}
+
+# Applicazione Mappings
+df_train['eff_score'] = df_train['effectiveness'].map(eff_map)
+df_train['side_score'] = df_train['sideEffects'].map(side_map)
+df_test['eff_score'] = df_test['effectiveness'].map(eff_map)
+df_test['side_score'] = df_test['sideEffects'].map(side_map)
+
+# Drop NaNs
+train_clean = df_train.dropna(subset=['rating', 'eff_score', 'side_score', cond_col]).copy()
+test_clean = df_test.dropna(subset=['rating', 'eff_score', 'side_score', cond_col]).copy()
+
+
+# Codifica della Condizione
+le = LabelEncoder()
+all_conditions = pd.concat([train_clean[cond_col], test_clean[cond_col]]).unique()
+le.fit(all_conditions.astype(str))
+
+train_clean['cond_encoded'] = le.transform(train_clean[cond_col].astype(str))
+test_clean['cond_encoded'] = le.transform(test_clean[cond_col].astype(str))
+
+
+# 2. FASE DI TRAINING
+features = ['eff_score', 'side_score', 'cond_encoded']
+target = 'rating'
+
+rf = RandomForestRegressor(
+    n_estimators=100,
+    random_state=42,
+    max_depth=10
+)
+
+rf.fit(train_clean[features], train_clean[target])
+
+
+# 3. FASE DI TESTING E VALIDAZIONE
+preds = rf.predict(test_clean[features])
+
+# Calcolo metriche
+rmse = np.sqrt(mean_squared_error(test_clean[target], preds))
+r2 = r2_score(test_clean[target], preds)
+
+# Feature Importance
+importances = rf.feature_importances_
+feature_names = ['Efficacia', 'Effetti Collaterali', 'Condizione']
+imp_df = pd.DataFrame({'Feature': feature_names, 'Importance': importances})
+
+
+# --- CREAZIONE TABELLA OUTPUT RICHIESTA ---
+results_table = pd.DataFrame({
+    'Condizione': test_clean[cond_col],
+    'Voto Reale': test_clean[target],
+    'Voto Predetto': preds,
+    'Errore': test_clean[target] - preds
+})
+
+# 4. REPORT E OUTPUT FINALE
+print("\n--- RISULTATI ALGORITMO RANDOM FOREST REGRESSOR ---")
+print("1. Performance (Test Set - Validazione):")
+print(f"RMSE (Errore Medio Assoluto): {rmse:.4f}")
+print(f"R2 (Affidabilità del Modello): {r2:.4f}")
+
+print("\n2. Importanza delle Features:")
+print(imp_df.sort_values('Importance', ascending=False))
+
+print("\n3. Dettaglio Predizioni (Prime 10 righe):")
+print(results_table.head(10).to_string(index=False))
+
+# Opzionale: Salvare in CSV per analisi completa
+results_table.to_csv('rf_predictions_detail.csv', index=False)
+print("\nTabella completa salvata in 'rf_predictions_detail.csv'")

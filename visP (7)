@@ -1,0 +1,138 @@
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import r2_score, mean_squared_error
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# 1. CARICAMENTO E PREPROCESSING DATI
+input_train_name = 'drugLibTrain_final_v3.tsv'
+input_test_name = 'drugLibTest_final_v3.tsv'
+
+try:
+    df_train = pd.read_csv(input_train_name, sep='\t')
+    df_test = pd.read_csv(input_test_name, sep='\t')
+except FileNotFoundError:
+    try:
+        # Fallback se non trova il file v3, prova con quello pulito o raw
+        df_train = pd.read_csv('drugLibTrain_final_clean.tsv', sep='\t')
+        df_test = pd.read_csv('drugLibTest_final_clean.tsv', sep='\t')
+    except:
+        print("Errore critico: File non trovati.")
+        exit()
+
+# Gestione colonna condizione
+cond_col = 'condition_standardized_v3'
+if cond_col not in df_train.columns:
+    if 'condition_standardized' in df_train.columns:
+        cond_col = 'condition_standardized'
+    else:
+        cond_col = 'condition' 
+
+# Mappings Ordinali
+eff_map = {
+    'Ineffective': 1, 'Marginally Effective': 2, 'Moderately Effective': 3,
+    'Considerably Effective': 4, 'Highly Effective': 5
+}
+side_map = {
+    'No Side Effects': 1, 'Mild Side Effects': 2, 'Moderate Side Effects': 3,
+    'Severe Side Effects': 4, 'Extremely Severe Side Effects': 5
+}
+
+# Applicazione Mappings
+df_train['eff_score'] = df_train['effectiveness'].map(eff_map)
+df_train['side_score'] = df_train['sideEffects'].map(side_map)
+df_test['eff_score'] = df_test['effectiveness'].map(eff_map)
+df_test['side_score'] = df_test['sideEffects'].map(side_map)
+
+# Drop NaNs
+train_clean = df_train.dropna(subset=['rating', 'eff_score', 'side_score', cond_col]).copy()
+test_clean = df_test.dropna(subset=['rating', 'eff_score', 'side_score', cond_col]).copy()
+
+
+# Codifica della Condizione
+le = LabelEncoder()
+all_conditions = pd.concat([train_clean[cond_col], test_clean[cond_col]]).unique()
+le.fit(all_conditions.astype(str))
+
+train_clean['cond_encoded'] = le.transform(train_clean[cond_col].astype(str))
+test_clean['cond_encoded'] = le.transform(test_clean[cond_col].astype(str))
+
+
+# 2. FASE DI TRAINING E PREDITTIVA
+features = ['eff_score', 'side_score', 'cond_encoded']
+target = 'rating'
+
+rf = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=10)
+rf.fit(train_clean[features], train_clean[target])
+preds = rf.predict(test_clean[features]) # Predizione sul Test Set
+actuals = test_clean[target]
+residuals = actuals - preds
+r2 = r2_score(actuals, preds)
+
+
+# 3. CALCOLO E ASSEGNAZIONE DEI PROFILI DI TOLLERANZA (per i colori)
+# Usiamo il Train Set per definire i cluster (correlazione)
+condition_stats = train_clean.groupby(cond_col).filter(lambda x: len(x) >= 5)
+profile_map = {}
+
+for cond, data in condition_stats.groupby(cond_col):
+    correlation = data['side_score'].corr(data['rating'])
+    
+    if pd.isna(correlation):
+        profile = 'Neutri'
+    elif correlation < -0.75: # Bassa Tolleranza
+        profile = 'Intolleranti'
+    elif correlation > -0.45: # Alta Tolleranza
+        profile = 'Stoici'
+    else:
+        profile = 'Neutri'
+    
+    profile_map[cond] = profile
+
+# Applichiamo i profili al Test Set per colorare il grafico
+test_clean['Profilo'] = test_clean[cond_col].map(profile_map).fillna('Neutri')
+
+
+# 4. GENERAZIONE GRAFICI DI PERFORMANCE (COLORATI)
+custom_palette = {'Intolleranti': '#e74c3c', 'Neutri': '#f1c40f', 'Stoici': '#2ecc71'}
+
+# --- GRAFICO 1: SCATTERPLOT ACTUAL VS PREDICTED (COLORATO) ---
+plt.figure(figsize=(10, 8))
+sns.set_style("whitegrid")
+
+sns.scatterplot(
+    x=actuals, 
+    y=preds,
+    hue=test_clean['Profilo'], # Colore basato sul profilo
+    palette=custom_palette,
+    alpha=0.6,
+    edgecolor='w',
+    s=80
+)
+
+plt.plot([1, 10], [1, 10], color='black', linestyle='--', linewidth=1.5, label='Predizione Perfetta')
+plt.title(f'1. Performance Predittiva per Profilo di Tolleranza (R²={r2:.2f})', fontsize=14, fontweight='bold')
+plt.xlabel('Voto Reale (Paziente)', fontsize=12)
+plt.ylabel('Voto Predetto (Random Forest)', fontsize=12)
+plt.xlim(0.5, 10.5)
+plt.ylim(0.5, 10.5)
+plt.legend(title='Profilo Paziente')
+plt.tight_layout()
+plt.savefig('viz_perf_actual_vs_pred_profiled.png', dpi=300)
+print("Grafico 1 salvato: viz_perf_actual_vs_pred_profiled.png")
+
+# PLOT B: DISTRIBUZIONE DEGLI ERRORI (Residui)
+plt.figure(figsize=(10, 6))
+sns.histplot(residuals, bins=30, kde=True, color='#3498db', edgecolor='black')
+
+plt.axvline(x=0, color='#e74c3c', linestyle='--', linewidth=2, label='Errore Zero')
+
+plt.title('Distribuzione degli Errori di Predizione (Residui)', fontsize=14, fontweight='bold')
+plt.xlabel('Errore (Voto Reale - Voto Predetto)', fontsize=12)
+plt.ylabel('Numero di Predizioni', fontsize=12)
+plt.legend()
+plt.tight_layout()
+plt.savefig('viz_perf_residuals.png', dpi=300)
+print("Salvato: viz_perf_residuals.png")
